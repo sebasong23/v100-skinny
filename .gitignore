@@ -1,10 +1,14 @@
 # Logs and scratch
 *.log
+*.log.*
 *.tmp
 __pycache__/
 *.pyc
 .DS_Store
 .claude/
+
+# Local venv (regenerate via setup.sh / bootstrap-sm70.sh)
+.venv-sm70/
 
 # Large / generated artifacts (kept out of VCS; regenerate via benchmarks/)
 *.pt
