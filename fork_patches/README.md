@@ -25,6 +25,7 @@ installed file: the tracked copy here is the reviewable source of truth.
 | `gpu_model_runner.py` | `vllm/v1/worker/gpu_model_runner.py` | Persistent-metadata speculative round, a per-phase GPU profiler, and NVTX phase brackets for per-kernel attribution. |
 | `gdn_attn.py` | `vllm/v1/attention/backends/gdn_attn.py` | Chain-MTP GDN fast metadata build (−1.4 ms/step, byte-identical output). |
 | `custom_all_reduce.py` | `vllm/distributed/device_communicators/custom_all_reduce.py` | All-reduce residency instrumentation, default off. Measurement tool, dormant in production. |
+| `qwen3coder_tool_parser.py` | `vllm/tool_parsers/qwen3coder_tool_parser.py` | Forced `supports_required_and_named=False`: `tool_choice: required`/named requests previously bypassed the XML extractor and got reconstructed as OpenAI JSON, which the Qwen XML this model emits never matches — the call was dropped (`tool_calls: []`) or the raw XML surfaced as `arguments`. Now every tool-choice mode routes through the XML parser (verified over the wire). |
 
 Not installed:
 
