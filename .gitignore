@@ -10,6 +10,10 @@ __pycache__/
 # Local venv (regenerate via setup.sh / bootstrap-sm70.sh)
 .venv-sm70/
 
+# Scratch output from scripts/stress-test.sh (regenerate on demand)
+results/stress-gpu-*.csv
+results/stress-requests-*.log
+
 # Large / generated artifacts (kept out of VCS; regenerate via benchmarks/)
 *.pt
 *.safetensors
