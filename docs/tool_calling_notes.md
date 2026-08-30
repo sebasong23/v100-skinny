@@ -104,6 +104,56 @@ and named returns JSON arguments (was the raw `<tool_call>` XML blob).
 the call and arguments are correct, so clients should not treat it as a
 failure.
 
+## Follow-up investigation 2026-08-30 10:45 — "empty pwsh{}" still occurring
+
+After the fix, the DeepSeek Harness (Windows box on the LAN) still reported
+`pwsh{}` → `INVALID_ARGS` inside a real Vue/PHP/SQLite todo-list task, while the
+same session's `todo_write` and `write` calls succeeded. A raw HTTP capture of
+the harness traffic (`tcpdump -i any -A port 8000`) settled it — **not a server
+bug, not a line-ending issue**.
+
+### Evidence from the capture
+
+- The harness streams (`"stream":true`, **no `tool_choice`** → auto), sending a
+  huge system prompt, 24 tools, history containing four prior `pwsh`
+  `arguments:"{}"` failures, and `max_completion_tokens: 32000`.
+- In the responses, `write` and `todo_write` stream full argument deltas
+  (`{`, `"file_path":…`, `"content":…`, `}`) — through the **same** XML parser,
+  **same** stream. `pwsh` streamed a header `name="pwsh"` then a single
+  `arguments:"{}"`. Five times in a row.
+- The server therefore relays the model faithfully: the model literally emits
+  `<function=pwsh>` with **no parameters** in that heavy context.
+
+### Ruled out
+
+| Hypothesis | Verdict |
+|---|---|
+| CRLF/LF Windows-vs-Linux (the "ln" question) | No — client JSON and server output both use LF; arguments are regenerated server-side, not echoed |
+| Long tool description (~1800-char `pwsh` sandbox policy) | No — reproduced locally with a 1870-char description; 3/3 full args |
+| Parser dropping args in streaming | No — `write`/`todo_write` survive the identical stream |
+| `tool_choice` routing (the earlier fix) | Confirmed working; unrelated to this symptom |
+
+### Diagnosis
+
+Model behaviour, not transport/parsing: under the harness's heavy context
+(huge system prompt + 24 tools + long degraded history), RadixArk Qwen3.8-27B
+falls into a **degeneration loop** — four identical empty `pwsh` calls with the
+same reasoning ("Let's create the directory and check the PHP version.").
+Signature is consistent with **MTP speculative-decoding degeneracy** (K=7
+draft) or long-chain-of-thought rationalisation of repeated failures. It is
+context-specific: short-context reproductions always emit full arguments.
+
+### Recommended follow-ups (run.sh env toggles, in order)
+
+1. `NOSPEC=1 ./run.sh` — disable the MTP drafter; breaks draft-driven
+   repetition loops.
+2. `THINKING=false ./run.sh` — drop the chain-of-thought that rationalises the
+   empty retries.
+3. Harness-side: shorten the `pwsh` tool description (the ~1800-char Windows
+   sandbox lecture is most of the condition).
+
+Not yet executed — server was still serving the fix at the time of writing.
+
 ## Residual caveats
 
 - `arguments` still requires whatever the tool schema marks `required`
