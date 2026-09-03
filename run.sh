@@ -2,9 +2,10 @@
 # =============================================================================
 # run.sh — convenience entrypoint for the dual-V100 TP2 NVFP4 server.
 # Thin wrapper over serve-tp2-pcie.sh: same env overrides all still work
-# (TP, K, GMU, MML, PORT, EAGER, NOSPEC, ...), this just defaults HOST to
-# 0.0.0.0 so the server is reachable from the LAN / Tailscale, not just
-# loopback.
+# (TP, K, GMU, MML, PORT, EAGER, NOSPEC, NOPREFIXCACHE, ...), this just
+# defaults HOST to 0.0.0.0 so the server is reachable from the LAN /
+# Tailscale, not just loopback. NOPREFIXCACHE defaults to 0, so vllm's
+# prefix caching stays ON (only disabled via NOPREFIXCACHE=1).
 #
 # ⚠️ Still NO AUTH on the server. Anything that can reach this box on its
 # LAN or tailnet can hit the API. Don't expose this port further (no
@@ -16,15 +17,17 @@
 # POWER_LIMIT_W, or set it to 0 to skip capping entirely.
 #
 # Usage:
-#   ./run.sh                     # binds 0.0.0.0:8000, caps GPUs at 200W
+#   ./run.sh                     # binds 0.0.0.0:8000, caps GPUs at 200W, prefix caching on
 #   PORT=8001 ./run.sh            # any serve-tp2-pcie.sh env var works here too
 #   HOST=127.0.0.1 ./run.sh       # back to loopback-only if needed
 #   POWER_LIMIT_W=250 ./run.sh    # back to stock power limit
 #   POWER_LIMIT_W=0 ./run.sh      # skip the power-limit step entirely
+#   NOPREFIXCACHE=1 ./run.sh      # add --no-enable-prefix-caching (disable prefix caching)
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export HOST="${HOST:-0.0.0.0}"
+export NOPREFIXCACHE="${NOPREFIXCACHE:-0}"
 
 POWER_LIMIT_W="${POWER_LIMIT_W:-200}"
 if [[ "$POWER_LIMIT_W" != "0" ]]; then

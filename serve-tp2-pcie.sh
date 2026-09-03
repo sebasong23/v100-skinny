@@ -31,6 +31,10 @@ THINKING="${THINKING:-true}"; EFFORT="${EFFORT:-medium}"; DRAFT="${DRAFT:-probab
 # isolates whether a hang/livelock is compile/graph-capture-specific).
 EAGER="${EAGER:-0}"; EAGER_FLAG=""
 [ "$EAGER" = "1" ] && EAGER_FLAG="--enforce-eager"
+# NOPREFIXCACHE=1: pass --no-enable-prefix-caching (diagnostic / low-VRAM —
+# disables automatic prefix-cache reuse across requests).
+NOPREFIXCACHE="${NOPREFIXCACHE:-0}"; PREFIXCACHE_FLAG=""
+[ "$NOPREFIXCACHE" = "1" ] && PREFIXCACHE_FLAG="--no-enable-prefix-caching"
 # NOSPEC=1: drop --speculative-config (MTP draft model) entirely (diagnostic —
 # isolates whether a hang is specific to MTP speculative decoding vs. the
 # base GDN-linear-attention model on TP2).
@@ -107,4 +111,5 @@ exec env \
   --compilation-config "{\"cudagraph_capture_sizes\":[$K1,$K2]}" \
   $SPEC_FLAG $SPEC_JSON \
   $EAGER_FLAG \
+  $PREFIXCACHE_FLAG \
   --host "$HOST" --port "$PORT" 2>&1 | tee -a "$LOG"

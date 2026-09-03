@@ -165,3 +165,107 @@ Not yet executed — server was still serving the fix at the time of writing.
 - The reasoning block (`reasoning` field) precedes content correctly; a
   leading `\n\n` content chunk is emitted before the tool call in streaming —
   harmless, clients typically trim.
+
+## Follow-up 2026-09-02 — `NOSPEC=1 ./run.sh` fixes the tool-call mangling
+
+The `edit`-tool failure in opencode (Windows box on the LAN → this server at
+`http://192.168.1.153:8000/v1`) was the *same* malformed-tool-call signature
+predicted above, but even more visible: opencode's heavier context (large
+system prompt + ~10 tools + real file contents) made the model emit an `edit`
+call whose `arguments` were mangled / truncated with a trailing `{}`
+(`{"filePath": "...", "oldString": "...", {...{}`), which the client then
+rejected as invalid JSON.
+
+Confirmed this was model-side, not transport/parser: the qwen3_coder parser
+patch was already installed and the running server was started after it, so
+the routing fix was active. The speculative config (`num_speculative_tokens=7`,
+K=7 MTP) was still on — the exact condition the earlier diagnosis flagged.
+
+### Resolution
+
+Restart with the MTP drafter disabled:
+
+```bash
+NOSPEC=1 ./run.sh
+```
+
+After restart, `scripts/test-tool-calling.sh` against `http://127.0.0.1:8000`
+passed all four modes (auto non-stream, auto stream, required, named-forced)
+with full JSON arguments — no empty `{}` and no raw XML blob. Note: same
+restart also revealed a (harmless) side effect — the first request still runs
+the one-time warmup (weight prepack + torch.compile + CUDA-graph capture),
+which takes ~2 min and briefly shows 0.0 tok/s with
+`shm_broadcast: No available shared memory broadcast block` warnings. That is
+warmup, not a hang.
+
+### run.sh default change
+
+While verifying, `run.sh` was also changed to default `NOPREFIXCACHE=0`
+(prefix caching **on**); `--no-enable-prefix-caching` is no longer passed by
+default. Re-enable with `NOPREFIXCACHE=1 ./run.sh` if needed. This did not
+appear to affect tool calling either way.
+
+### Not yet ruled out
+
+- `THINKING=false ./run.sh` (docs step 2) was **not** needed in the
+  short/medium-context smoke test, but is still the next lever if a heavy
+  opencode context regresses again.
+- Full opencode end-to-end `edit` on a real file with large context is the
+  definitive regression check; re-test there before calling it fixed.
+
+## Follow-up 2026-09-03 — tried swapping in froggeric's chat template to avoid `NOSPEC=1`
+
+`NOSPEC=1` fixes the tool-call mangling but roughly halves throughput
+(~70 tok/s → ~35 tok/s). Investigated whether the mangling was actually a
+chat-template bug (as opposed to the MTP degeneracy already diagnosed above)
+by trying [froggeric/Qwen-Fixed-Chat-Templates](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)
+(`chat_template.jinja`, tagged `qwen3.8-froggeric-v22.4`, explicitly targets
+`Qwen3.8-27B`) with speculative decoding left **on**.
+
+### What changed
+
+- `RadixArk_Qwen3.8-27B-NVFP4/chat_template.jinja` replaced with froggeric's
+  version. Original backed up alongside it as
+  `chat_template.jinja.bak-20260903-214657` (restore by copying that back
+  over `chat_template.jinja`). This checkpoint directory is gitignored, so
+  this change is filesystem-only — not a git commit.
+- `serve-tp2-pcie.sh` / `run.sh` **unchanged**. In particular still
+  `--tool-call-parser qwen3_coder` (the already-patched
+  `fork_patches/qwen3coder_tool_parser.py`), **not** the newer built-in
+  `qwen3_xml` parser — checked its source
+  (`vllm/tool_parsers/qwen3xml_tool_parser.py`, vLLM 1.2.2) and it does not
+  override `supports_required_and_named`, so it defaults to `True` and would
+  reintroduce the exact `required`/named routing bug the qwen3_coder patch
+  above already fixed. froggeric's template defaults to the same
+  `tool_call_format="xml"` (`<tool_call><function=...><parameter=...>`)
+  output as the original template, so it stays compatible with the patched
+  `qwen3_coder` parser without any serve-script changes.
+- Verified offline with a plain jinja2 render (tools + assistant tool_calls +
+  tool response) before touching the live server — renders cleanly, same XML
+  shape as before.
+- Restarted with plain `./run.sh` (`NOSPEC` unset → `0`, spec decoding **on**,
+  K=7 MTP as usual). `scripts/test-tool-calling.sh` passed all four
+  tool_choice modes (auto non-stream, auto stream, required, named-forced)
+  with clean JSON arguments.
+
+### Caveat — not yet a real fix, just not yet disproven
+
+`scripts/test-tool-calling.sh` is a **short-context** smoke test that has
+always passed, even before this change and even with spec decoding on — it
+never exercised the actual bug. The mangling this template swap was meant to
+fix only appeared under **heavy context** (opencode/DeepSeek-harness: large
+system prompt, 10-24 tools, long history) and was diagnosed above as MTP
+speculative-decoding degeneracy, not a template bug. froggeric's docs don't
+mention MTP or speculative decoding at all — its fixes are for template
+rendering (JSON-string tool-arg crashes, empty-think handling, rendering
+errors), so there's no specific reason to expect it fixes a decoding-time
+degeneracy.
+
+**Net: template swap done, spec decoding left on, short-context test passes,
+but the real regression check — a heavy-context opencode/harness session —
+has not been run against this combination yet.** If the mangling recurs,
+this template swap did not fix it; fall back to `NOSPEC=1` (or try lowering
+`K`, e.g. `K=2 ./run.sh`, as an untested middle ground) and consider
+reverting `chat_template.jinja` from the `.bak-20260903-214657` copy (though
+reverting the template is not expected to matter either way, since it wasn't
+implicated).
