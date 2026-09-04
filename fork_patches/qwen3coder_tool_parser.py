@@ -311,6 +311,30 @@ class Qwen3CoderToolParser(ToolParser):
 
         # If no delta text, return None unless it's an EOS token after tools
         if not delta_text:
+            # Truncated tool call: the model can stop (under MTP degeneration)
+            # before emitting </function></tool_call>. If the JSON object for
+            # this tool is still open, hand the serving layer an empty
+            # arguments delta for THIS tool so its un-streamed-args
+            # autocomplete (entrypoints/openai/chat_completion/serving.py
+            # _should_check_for_unstreamed_tool_arg_tokens) runs and emits
+            # exactly the missing closing "}" (it only runs when the last
+            # delta carries tool_calls). Without this, the client receives an
+            # unterminated JSON object and reports "JSON Parse error:
+            # Expected '}'".
+            if (
+                self.in_function
+                and not self.json_closed
+                and self.json_started
+                and self.current_tool_index < len(self.prev_tool_call_arr)
+            ):
+                return DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_index,
+                            function=DeltaFunctionCall(arguments=""),
+                        )
+                    ]
+                )
             # Check if this is an EOS token after all tool calls are complete
             # Check for tool calls in text even if is_tool_call_started
             # is False (might have been reset after processing all tools)
@@ -590,6 +614,23 @@ class Qwen3CoderToolParser(ToolParser):
                         self.current_tool_index,
                         len(self.streamed_args_for_tool),
                     )
+
+                # Keep prev_tool_call_arr in sync with what has been fully
+                # parsed so far. The serving layer uses this as the
+                # "expected" arguments for the un-streamed-args autocomplete
+                # at stream end (entrypoints/openai/chat_completion/serving.py
+                # _should_check_for_unstreamed_tool_arg_tokens). It is
+                # initialized to "{}" at header time and only overwritten when
+                # </function> is seen; if the model truncates the tool call
+                # before the closing tags (the MTP degeneration signature),
+                # the autocomplete would append "{}" to the already-valid
+                # streamed prefix, yielding malformed arguments. Syncing the
+                # complete-arguments form here means the autocomplete merely
+                # appends the missing "}".
+                if self.current_tool_index < len(self.prev_tool_call_arr):
+                    self.prev_tool_call_arr[self.current_tool_index][
+                        "arguments"
+                    ] = self.streamed_args_for_tool[self.current_tool_index] + "}"
 
                 return DeltaMessage(
                     tool_calls=[

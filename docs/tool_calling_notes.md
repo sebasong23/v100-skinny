@@ -269,3 +269,77 @@ this template swap did not fix it; fall back to `NOSPEC=1` (or try lowering
 reverting `chat_template.jinja` from the `.bak-20260903-214657` copy (though
 reverting the template is not expected to matter either way, since it wasn't
 implicated).
+
+## Follow-up 2026-09-04 — reproduced the opencode parse error; fixed in `qwen3_coder` parser
+
+The 09-04 morning opencode session hit the predicted malformed-`arguments`
+signature again on this server (`100.92.165.40:8000`, spec decoding **on**, K=7).
+`read`/`edit`/`grep`/`bash` tool calls intermittently failed client-side with
+`JSON Parse error: Expected '}'`, e.g.
+
+```
+{"filePath": "C:\wamp64\www\soatest\testphp\api3\test_vendor_add_edit_operations.php".
+{"filePath": "...", "limit": 120.            ← closing } replaced by .
+{"command": "... Write-Output 'CHANGED' }".  ← outer } missing
+```
+
+Same opencode + same toolset on the 2080-fp8 box ran clean all day → server-side.
+
+### Reproduction (this box)
+
+Started the production config (`./run.sh`, spec on) and drove a 8–30 turn
+opencode-shaped session (streaming, `read`/`edit`/`grep`/`bash`/`write`, real
+file contents fed back as tool results). The failure was captured in the first
+turns of every pre-fix run. Observed on the wire (`stream: true`):
+
+1. **Trailing `{}`** (`chunks: [{, "filePath":…, "oldString":…, {}]`) — the
+   *09-02 signature*. The model truncated the XML before `</function>`
+   (`.../serve-tp2-pcie.sh", "oldString": "EAGER=\"${EAGER:-0}\"; EAGER_FLAG=\"\""` then EOS).
+   At stream end, `prev_tool_call_arr[..]["arguments"]` is still the `"{}"`
+   stub set at `<function=` header time, so vLLM's un-streamed-args
+   autocomplete appends `{}` to the already-valid prefix →
+   `{...""{}` (invalid).
+2. **Missing closing `}`** (this incident's shape) — final SSE delta is
+   `{"content": "", "finish_reason": "tool_calls"}` with **no** tool_calls. The
+   autocomplete only runs when the *last* delta carries `tool_calls`; when EOS
+   arrives as a separate step while the tool JSON is still open, the parser
+   returned `None`, `_should_check_for_unstreamed_tool_arg_tokens` short-
+   circuit → the closing `}` was never emitted. Non-streaming of the same
+   request produced clean args (frontier regex + `json.dumps`), confirming this
+   is the streaming path, not the model alone.
+
+Root cause is a vLLM streaming-side completion gap under the model's (MTP)
+truncation behaviour — the model itself still emitted the correct values; the
+server just failed to close the JSON it had already streamed.
+
+### Fix — `fork_patches/qwen3coder_tool_parser.py` (restart required)
+
+1. **EOS guard** in `extract_tool_calls_streaming`: when the stream ends with
+   a tool whose JSON object is still open (`in_function`, `not json_closed`,
+   `json_started`), return a `DeltaMessage` with an empty `arguments` delta for
+   that tool. This makes the serving-layer autocomplete run and emit exactly
+   the missing `}`. (It previously returned `None`, so no closing brace was
+   sent at all.)
+2. **`prev_tool_call_arr` sync**: after each fully-parsed parameter fragment,
+   overwrite `prev_tool_call_arr[..]["arguments"]` with
+   `streamed_args_for_tool[..] + "}"` instead of leaving the `"{}"` header
+   stub. The autocomplete then appends the correct `}`/tail rather than a
+   spurious `{}`.
+
+Deployed as usual: copy to `site-packages/vllm/tool_parsers/` (identical to
+the tracked fork copy) and restart. No serve-script/config change; spec
+decoding stays on (no throughput loss).
+
+### Verification
+
+- `scripts/test-tool-calling.sh` — 4/4 modes still clean.
+- Heavy-context sweep (40 turns, same harness that reproduced pre-fix):
+  **0 malformed tool calls.** Every pre-fix run hit a failure within the first
+  ~7 turns, so this is a real elimination, not luck. Malformed-tail shapes
+  (`{}` gutter / missing `}`) gone; no double-`}` regression introduced.
+
+Watch item: this fix hardens the streaming layer. If you still see `{}` calls,
+that is the model emitting a parameterless `<function=…>` (faithful relay, and
+the client correctly rejects it as missing keys) — a model-side degeneration,
+not the parser. `NOSPEC=1` remains the throughput trade-off lever if it
+recurs under even heavier context.
